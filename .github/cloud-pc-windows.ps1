@@ -245,6 +245,34 @@ function Remove-PublishedScreenshot([string]$file) {
   Publish-ThroughApi "Cloud PC: end session" $true $file | Out-Null
 }
 
+# A run that is cancelled is killed on the spot, so it never gets to tidy up, and
+# pictures/notes from an older troubleshooting run can sit in the repository for
+# days. They are cleared out here, when a session starts.
+function Clear-OldScratch {
+  if (-not $script:Token) { return }
+  if (-not $script:RepoFullName -or $script:RepoFullName -notmatch "/") { return }
+  $api = "https://api.github.com/repos/$($script:RepoFullName)/contents"
+  $headers = @{
+    Authorization          = "Bearer $($script:Token)"
+    "User-Agent"           = "cloud-pc"
+    Accept                 = "application/vnd.github+json"
+    "X-GitHub-Api-Version" = "2022-11-28"
+  }
+  $listUri = $api + "/"
+  if ($script:Branch) { $listUri += "?ref=" + [uri]::EscapeDataString($script:Branch) }
+  try {
+    foreach ($entry in (Invoke-RestMethod -Uri $listUri -Headers $headers -Method Get -TimeoutSec 30)) {
+      if ($script:ScratchFiles -notcontains $entry.name) { continue }
+      $delUri = "$api/$($entry.name)"
+      if ($script:Branch) { $delUri += "?ref=" + [uri]::EscapeDataString($script:Branch) }
+      $body = @{ message = "Cloud PC: clear an old troubleshooting file"; sha = $entry.sha }
+      if ($script:Branch) { $body.branch = $script:Branch }
+      Invoke-RestMethod -Uri $delUri -Headers $headers -Method Delete -Body ($body | ConvertTo-Json -Compress) -ContentType "application/json" -TimeoutSec 30 | Out-Null
+      Note "cleared an old troubleshooting file left in the repository ($($entry.name))"
+    }
+  } catch { }
+}
+
 function Save-State([string]$status) {
   if (-not $script:TunnelUrl) { return }
   $obj = [ordered]@{
@@ -327,6 +355,7 @@ try {
 } catch { Note "host: unknown" }
 Note "session $($script:Session), run $($script:RunId), password set"
 Save-Starting
+Clear-OldScratch
 
 # --- keep the desktop awake and out of the way ---------------------------
 try {
