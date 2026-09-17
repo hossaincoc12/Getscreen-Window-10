@@ -1,0 +1,66 @@
+# Cloud PC for Windows  (https://perchance.org/cloud-pc)
+# ---------------------------------------------------------------------------
+# Starts a throwaway Windows desktop on a GitHub Actions runner and publishes
+# its address into this repository (cloud-pc-windows.json), so the Cloud PC
+# page can show the desktop inside a phone or desktop browser.
+#
+# The page starts this by hand (POST .../actions/workflows/cloud-pc-windows.yml/
+# dispatches) and deletes the published file / cancels this run when you press
+# "End session". Nothing here runs on a schedule.
+#
+# The desktop is built and thrown away inside this single job:
+#   * Windows only lives for as long as this job - 6 hours at the very most.
+#   * If the repository is public, the published address + password are public
+#     too while the session runs, so treat the desktop as a throwaway machine.
+#
+# You can safely edit this file, but keep `on: workflow_dispatch` and its three
+# inputs (session, password, runner), or the Cloud PC page will not be able to
+# start it.
+
+name: Cloud PC Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      session:
+        description: Session id from the Cloud PC page (used to match this run)
+        required: false
+        default: ""
+      password:
+        description: Desktop password - 8 characters or fewer (VNC truncates longer ones)
+        required: false
+        default: "cloudpc"
+      runner:
+        description: Which Windows image to run on (windows-2022 looks like Windows 10)
+        required: false
+        default: "windows-2022"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cloud-pc-windows
+  cancel-in-progress: false
+
+jobs:
+  desktop:
+    name: Windows desktop
+    runs-on: ${{ inputs.runner || 'windows-2022' }}
+    timeout-minutes: 355
+
+    env:
+      CLOUDPC_PASSWORD: ${{ inputs.password }}
+      CLOUDPC_SESSION: ${{ inputs.session }}
+      CLOUDPC_STATE: cloud-pc-windows.json
+      # Lets the script keep the desktop password out of the published file and
+      # the job log when the repository is public, where anybody could read them.
+      CLOUDPC_REPO_PRIVATE: ${{ github.event.repository.private }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the Windows desktop
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          & "$env:GITHUB_WORKSPACE/.github/cloud-pc-windows.ps1"
