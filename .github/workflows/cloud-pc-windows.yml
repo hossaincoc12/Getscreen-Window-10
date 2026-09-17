@@ -34,6 +34,10 @@ on:
         description: Which Windows image to run on (windows-2022 looks like Windows 10)
         required: false
         default: "windows-2022"
+      probe:
+        description: Also serve a page that tests the screen connection (only for troubleshooting)
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -55,6 +59,9 @@ jobs:
       # Lets the script keep the desktop password out of the published file and
       # the job log when the repository is public, where anybody could read them.
       CLOUDPC_REPO_PRIVATE: ${{ github.event.repository.private }}
+      # Only set when the workflow is started for troubleshooting: makes the
+      # runner serve cloudpc-probe.html next to the viewer.
+      CLOUDPC_PROBE: ${{ inputs.probe }}
       # Used to publish/remove cloud-pc-windows.json through the GitHub API, which
       # keeps working even if the local git checkout cannot push.
       CLOUDPC_TOKEN: ${{ github.token }}
