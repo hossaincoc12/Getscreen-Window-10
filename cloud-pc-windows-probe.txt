@@ -1,0 +1,29 @@
+Cloud PC probe - run 35276231552 - 2026-09-17T21:22:35
+this script runs in session 2
+--- sessions (qwinsta) ---
+SESSIONNAME       USERNAME                 ID  STATE   TYPE        DEVICE 
+ services                                    0  Disc                        
+>console           runneradmin               2  Active                      
+ 31c5ce94259d4...                        65536  Listen                      
+ rdp-tcp                                 65537  Listen
+--- desktop processes ---
+  explorer pid 5640 session 2
+  winlogon pid 4732 session 2
+--- TightVNC settings ---
+  key HKLM:\SOFTWARE\TightVNC\Server
+    AllowLoopback = 1
+    PollingInterval = 100
+    RfbPort = 5900
+    UseVncAuthentication = 1
+    Password = (hidden)
+asked Windows to keep the display on (no stand-by, no switching off)
+created the local account cloudpc
+told Windows to sign cloudpc in by itself if it ever starts again
+--- after the sign-in attempt ---
+SESSIONNAME       USERNAME                 ID  STATE   TYPE        DEVICE 
+ services                                    0  Disc                        
+ console                                     1  Conn                        
+>                  runneradmin               2  Disc                        
+ 31c5ce94259d4...                        65536  Listen                      
+ rdp-tcp                                 65537  Listen
+  explorer pid 5640 session 2
