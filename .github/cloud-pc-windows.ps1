@@ -457,18 +457,24 @@ else {
   python -m pip install --quiet --disable-pip-version-check --user vncdotool 2>&1 | Out-String | Write-Host
   $shotPath = Join-Path (Get-RepoRoot) $script:ShotName
   $py = @"
+import traceback
 from vncdotool import api
-client = api.connect('127.0.0.1::5900', password=r'$($script:Pw)', timeout=90)
-print('cloud pc: the machine says its screen is', client.width, 'x', client.height)
-client.captureScreen(r'$shotPath')
-colours = client.screen.getcolors(maxcolors=2000000)
-if colours is None:
-    print('cloud pc: the screen is full of colours - that looks like a real desktop')
-else:
-    colours.sort(reverse=True)
-    print('cloud pc: the screen has', len(colours), 'colours; the commonest is', colours[0][1], 'covering', colours[0][0], 'of', client.width * client.height, 'pixels')
-client.disconnect()
-print('cloud pc: the screen picture was captured')
+try:
+    client = api.connect('127.0.0.1::5900', password=r'$($script:Pw)', timeout=90)
+    client.captureScreen(r'$shotPath')
+    image = client.screen
+    width, height = image.size
+    print('cloud pc: the machine says its screen is', width, 'x', height)
+    colours = image.getcolors(maxcolors=2000000)
+    if colours is None:
+        print('cloud pc: the screen is full of colours - that looks like a real desktop')
+    else:
+        colours.sort(reverse=True)
+        print('cloud pc: the screen has', len(colours), 'colours; the commonest is', colours[0][1], 'covering', colours[0][0], 'of', width * height, 'pixels')
+    client.disconnect()
+    print('cloud pc: the screen picture was captured')
+except Exception:
+    traceback.print_exc()
 "@
   $pyPath = Join-Path $env:TEMP "cloudpc-shot.py"
   [System.IO.File]::WriteAllText($pyPath, $py)
