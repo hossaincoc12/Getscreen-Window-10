@@ -1,0 +1,19 @@
+Cloud PC probe - run 35276840767 - 2026-09-17T21:29:17
+this script runs in session 2
+--- sessions (qwinsta) ---
+SESSIONNAME       USERNAME                 ID  STATE   TYPE        DEVICE 
+ services                                    0  Disc                        
+>console           runneradmin               2  Active                      
+ 31c5ce94259d4...                        65536  Listen                      
+ rdp-tcp                                 65537  Listen
+--- desktop processes ---
+  explorer pid 6636 session 2
+  winlogon pid 6748 session 2
+--- TightVNC settings ---
+  key HKLM:\SOFTWARE\TightVNC\Server
+    AllowLoopback = 1
+    PollingInterval = 100
+    RfbPort = 5900
+    UseVncAuthentication = 1
+    Password = (hidden)
+asked Windows to keep the display on (no stand-by, no switching off)
