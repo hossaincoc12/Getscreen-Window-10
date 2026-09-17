@@ -26,9 +26,15 @@ $ProgressPreference = "SilentlyContinue"
 
 $script:StartedUtc = (Get-Date).ToUniversalTime()
 $script:MaxMinutes = 350                 # the job itself is capped at 355 minutes
-$script:Home = if ($env:GITHUB_WORKSPACE) { $env:GITHUB_WORKSPACE } else { (Get-Location).Path }
+# NOTE: never call this $script:Home - PowerShell's own $HOME variable is
+# read-only, so assigning to $script:Home throws and leaves it empty.
+$script:RepoRoot = if ($env:GITHUB_WORKSPACE) { $env:GITHUB_WORKSPACE } else { (Get-Location).Path }
 $script:StateName = if ($env:CLOUDPC_STATE) { $env:CLOUDPC_STATE } else { "cloud-pc-windows.json" }
-$script:StatePath = Join-Path $script:Home $script:StateName
+$script:StatePath = Join-Path $script:RepoRoot $script:StateName
+# A workflow token is handed in so the address can also be published through the
+# GitHub REST API, which works even when the local git checkout is unusable.
+$script:Token = "$env:CLOUDPC_TOKEN"
+$script:RepoFullName = "$env:GITHUB_REPOSITORY"
 $script:Pw = if ([string]::IsNullOrWhiteSpace($env:CLOUDPC_PASSWORD)) { "cloudpc" } else { $env:CLOUDPC_PASSWORD }
 # VNC only ever uses the first 8 characters of a password, and the install command
 # carries the password as an MSI property, so keep it to plain 8 characters here -
@@ -107,26 +113,108 @@ function Test-DesktopReachable() {
   } catch { return $false }
 }
 
-function Push-State {
-  Push-Location $script:Home
+function Get-RepoRoot {
+  if ($script:RepoRoot -and (Test-Path $script:RepoRoot)) { return $script:RepoRoot }
+  if ($env:GITHUB_WORKSPACE -and (Test-Path $env:GITHUB_WORKSPACE)) { return $env:GITHUB_WORKSPACE }
+  return (Get-Location).Path
+}
+
+function Publish-ThroughApi([string]$message, [bool]$remove = $false) {
+  # Second way of publishing, which does not need a working git checkout at all.
+  if (-not $script:Token) { return $false }
+  if (-not $script:RepoFullName -or $script:RepoFullName -notmatch "/") { return $false }
+  $uri = "https://api.github.com/repos/$($script:RepoFullName)/contents/$($script:StateName)"
+  $headers = @{
+    Authorization          = "Bearer $($script:Token)"
+    "User-Agent"           = "cloud-pc"
+    Accept                 = "application/vnd.github+json"
+    "X-GitHub-Api-Version" = "2022-11-28"
+  }
   try {
-    git config user.name "cloud-pc" 2>$null
-    git config user.email "cloud-pc@users.noreply.github.com" 2>$null
-    git add -- $script:StateName 2>$null
-    git diff --cached --quiet 2>$null
-    if ($LASTEXITCODE -eq 0) { Note "the published address is already up to date"; return }
-    git commit -q -m "Cloud PC: Windows session $($script:RunId)" 2>$null
-    for ($i = 1; $i -le 3; $i++) {
-      if ($script:Branch) { git push -q origin "HEAD:$($script:Branch)" 2>&1 | Out-String | Write-Host }
-      else { git push -q 2>&1 | Out-String | Write-Host }
-      if ($LASTEXITCODE -eq 0) { Note "published the desktop address into the repository"; return }
-      Note "pushing the desktop address failed (attempt $i) - retrying"
-      if ($script:Branch) { git pull -q --rebase --autostash origin $script:Branch 2>$null }
-      else { git pull -q --rebase --autostash 2>$null }
-      Start-Sleep -Seconds 5
+    $sha = $null
+    $getUri = $uri
+    if ($script:Branch) { $getUri = $uri + "?ref=" + [uri]::EscapeDataString($script:Branch) }
+    try {
+      $cur = Invoke-RestMethod -Uri $getUri -Headers $headers -Method Get -TimeoutSec 30
+      $sha = $cur.sha
+    } catch { }
+    if ($remove) {
+      if (-not $sha) { Note "there is no published address to remove"; return $true }
+      $body = @{ message = $message; sha = $sha }
+      if ($script:Branch) { $body.branch = $script:Branch }
+      Invoke-RestMethod -Uri $uri -Headers $headers -Method Delete -Body ($body | ConvertTo-Json -Compress) -ContentType "application/json" -TimeoutSec 30 | Out-Null
+      Note "removed the published address through the GitHub API"
+      return $true
     }
-    Warn "could not publish the desktop address into the repository (the workflow may not have write permission). The address is: $($script:TunnelUrl) (password: $($script:Pw)) - note that this job log is public if the repository is public."
+    if (-not (Test-Path $script:StatePath)) { return $false }
+    $body = @{
+      message = $message
+      content = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($script:StatePath))
+    }
+    if ($script:Branch) { $body.branch = $script:Branch }
+    if ($sha) { $body.sha = $sha }
+    Invoke-RestMethod -Uri $uri -Headers $headers -Method Put -Body ($body | ConvertTo-Json -Compress) -ContentType "application/json" -TimeoutSec 30 | Out-Null
+    Note "published the desktop address through the GitHub API"
+    return $true
+  } catch {
+    Note "publishing through the GitHub API failed: $($_.Exception.Message)"
+    return $false
+  }
+}
+
+function Push-State([switch]$Remove) {
+  $published = $false
+  $message = if ($Remove) { "Cloud PC: end Windows session $($script:RunId)" } else { "Cloud PC: Windows session $($script:RunId)" }
+  Push-Location (Get-RepoRoot)
+  try {
+    try {
+      if ((& git rev-parse --is-inside-work-tree 2>$null | Out-String).Trim() -eq "true") {
+        git config user.name "cloud-pc" 2>$null
+        git config user.email "cloud-pc@users.noreply.github.com" 2>$null
+        git add -- $script:StateName 2>$null
+        git diff --cached --quiet 2>$null
+        if ($LASTEXITCODE -eq 0) {
+          Note "the published address is already up to date"
+          $published = $true
+        } else {
+          git commit -q -m $message 2>$null
+          for ($i = 1; $i -le 3; $i++) {
+            if ($script:Branch) { git push -q origin "HEAD:$($script:Branch)" 2>&1 | Out-String | Write-Host }
+            else { git push -q 2>&1 | Out-String | Write-Host }
+            if ($LASTEXITCODE -eq 0) {
+              if ($Remove) { Note "removed the published address from the repository" }
+              else { Note "published the desktop address into the repository" }
+              $published = $true
+              break
+            }
+            Note "pushing to the repository failed (attempt $i) - retrying"
+            if ($script:Branch) { git pull -q --rebase --autostash origin $script:Branch 2>$null }
+            else { git pull -q --rebase --autostash 2>$null }
+            Start-Sleep -Seconds 5
+          }
+        }
+      } else {
+        Note "this directory is not a git working tree - using the GitHub API instead"
+      }
+    } catch { Note "git could not be used here: $($_.Exception.Message)" }
   } finally { Pop-Location }
+  if ($published) { return }
+  if (Publish-ThroughApi $message $Remove) { return }
+  if ($Remove) { Note "the published address could not be removed by this job - the Cloud PC page removes it again the next time you start or end a session" }
+  else { Warn "could not publish the desktop address into the repository (the workflow may not have write permission). The address is: $($script:TunnelUrl) (password: $($script:Pw)) - note that this job log is public if the repository is public." }
+}
+
+function Remove-PublishedState {
+  if (-not (Test-Path $script:StatePath)) {
+    # Nothing to commit - but the published copy may still be in the repository,
+    # so ask the API to delete it.
+    Note "there is no local $($script:StateName) to remove - asking the GitHub API"
+    Publish-ThroughApi "Cloud PC: end Windows session $($script:RunId)" $true | Out-Null
+    return
+  }
+  try { Remove-Item $script:StatePath -Force -ErrorAction Stop }
+  catch { Note "could not remove $($script:StateName): $($_.Exception.Message)" }
+  Push-State -Remove
 }
 
 function Save-State([string]$status) {
@@ -342,7 +430,7 @@ try {
   # Remove the published address, so the desktop cannot be reached after the
   # session is over (the machine itself is thrown away by GitHub anyway).
   try {
-    if (Test-Path $script:StatePath) { Remove-Item $script:StatePath -Force; Push-State }
+    Remove-PublishedState
   } catch { Note "could not remove $($script:StateName): $($_.Exception.Message)" }
   Note "session over. Thanks for flying Cloud PC."
 }
