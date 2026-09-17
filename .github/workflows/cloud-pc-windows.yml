@@ -55,6 +55,9 @@ jobs:
       # Lets the script keep the desktop password out of the published file and
       # the job log when the repository is public, where anybody could read them.
       CLOUDPC_REPO_PRIVATE: ${{ github.event.repository.private }}
+      # Used to publish/remove cloud-pc-windows.json through the GitHub API, which
+      # keeps working even if the local git checkout cannot push.
+      CLOUDPC_TOKEN: ${{ github.token }}
 
     steps:
       - uses: actions/checkout@v4
