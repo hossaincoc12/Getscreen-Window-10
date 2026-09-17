@@ -18,6 +18,9 @@
 # start it.
 
 name: Cloud PC Windows
+# The session id is part of the run's title, so the Cloud PC page can point at
+# exactly the run it started (instead of guessing among recent runs).
+run-name: Cloud PC Windows [${{ inputs.session }}]
 
 on:
   workflow_dispatch:
