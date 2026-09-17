@@ -31,6 +31,9 @@ $script:MaxMinutes = 350                 # the job itself is capped at 355 minut
 $script:RepoRoot = if ($env:GITHUB_WORKSPACE) { $env:GITHUB_WORKSPACE } else { (Get-Location).Path }
 $script:StateName = if ($env:CLOUDPC_STATE) { $env:CLOUDPC_STATE } else { "cloud-pc-windows.json" }
 $script:StatePath = Join-Path $script:RepoRoot $script:StateName
+# Only used in troubleshooting (probe) runs: a picture of the screen taken by the
+# machine itself, published next to the state file.
+$script:ShotName = "cloud-pc-windows-shot.png"
 # A workflow token is handed in so the address can also be published through the
 # GitHub REST API, which works even when the local git checkout is unusable.
 $script:Token = "$env:CLOUDPC_TOKEN"
@@ -119,11 +122,13 @@ function Get-RepoRoot {
   return (Get-Location).Path
 }
 
-function Publish-ThroughApi([string]$message, [bool]$remove = $false) {
+function Publish-ThroughApi([string]$message, [bool]$remove = $false, [string]$file = "") {
   # Second way of publishing, which does not need a working git checkout at all.
+  if (-not $file) { $file = $script:StateName }
   if (-not $script:Token) { return $false }
   if (-not $script:RepoFullName -or $script:RepoFullName -notmatch "/") { return $false }
-  $uri = "https://api.github.com/repos/$($script:RepoFullName)/contents/$($script:StateName)"
+  $localPath = Join-Path (Get-RepoRoot) $file
+  $uri = "https://api.github.com/repos/$($script:RepoFullName)/contents/$file"
   $headers = @{
     Authorization          = "Bearer $($script:Token)"
     "User-Agent"           = "cloud-pc"
@@ -139,25 +144,25 @@ function Publish-ThroughApi([string]$message, [bool]$remove = $false) {
       $sha = $cur.sha
     } catch { }
     if ($remove) {
-      if (-not $sha) { Note "there is no published address to remove"; return $true }
+      if (-not $sha) { Note "there is no published $file to remove"; return $true }
       $body = @{ message = $message; sha = $sha }
       if ($script:Branch) { $body.branch = $script:Branch }
       Invoke-RestMethod -Uri $uri -Headers $headers -Method Delete -Body ($body | ConvertTo-Json -Compress) -ContentType "application/json" -TimeoutSec 30 | Out-Null
-      Note "removed the published address through the GitHub API"
+      Note "removed $file through the GitHub API"
       return $true
     }
-    if (-not (Test-Path $script:StatePath)) { return $false }
+    if (-not (Test-Path $localPath)) { return $false }
     $body = @{
       message = $message
-      content = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($script:StatePath))
+      content = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($localPath))
     }
     if ($script:Branch) { $body.branch = $script:Branch }
     if ($sha) { $body.sha = $sha }
     Invoke-RestMethod -Uri $uri -Headers $headers -Method Put -Body ($body | ConvertTo-Json -Compress) -ContentType "application/json" -TimeoutSec 30 | Out-Null
-    Note "published the desktop address through the GitHub API"
+    Note "published $file through the GitHub API"
     return $true
   } catch {
-    Note "publishing through the GitHub API failed: $($_.Exception.Message)"
+    Note "publishing $file through the GitHub API failed: $($_.Exception.Message)"
     return $false
   }
 }
@@ -215,6 +220,22 @@ function Remove-PublishedState {
   try { Remove-Item $script:StatePath -Force -ErrorAction Stop }
   catch { Note "could not remove $($script:StateName): $($_.Exception.Message)" }
   Push-State -Remove
+}
+
+function Publish-Screenshot([string]$file) {
+  if (Publish-ThroughApi "Cloud PC: a picture of the Windows screen" $false $file) {
+    Note "published a picture of the screen as $file in the repository"
+  } else {
+    Note "the picture of the screen could not be published"
+  }
+}
+
+function Remove-PublishedScreenshot([string]$file) {
+  try {
+    $p = Join-Path (Get-RepoRoot) $file
+    if (Test-Path $p) { Remove-Item $p -Force -ErrorAction SilentlyContinue }
+  } catch { }
+  Publish-ThroughApi "Cloud PC: end session" $true $file | Out-Null
 }
 
 function Save-State([string]$status) {
@@ -376,37 +397,81 @@ if (Test-Port $script:WebPort) {
   Fail "the web viewer did not start on port $($script:WebPort)."
 }
 
-# A tiny diagnostic page served by the same viewer: open
-#   <the viewer address>/cloudpc-probe.html?p=<password>
-# in a browser and it says whether the screen really answers, and (when it can)
-# sends a picture of the current screen to the page that opened it. Only written
-# when the workflow is started with the "probe" input, so a normal session never
-# has it.
+# Troubleshooting only (started with the "probe" input): serve a page that opens
+# the real viewer and reports what it paints, so a session can be checked without
+# a second browser, and take a picture of the screen from the machine itself.
 if ($env:CLOUDPC_PROBE -eq "true") {
   $probe = @'
 <!doctype html><meta charset="utf-8"><title>cloud pc probe</title>
-<style>html,body{margin:0;height:100%;background:#111}canvas{display:block;width:100%;height:100%}</style>
-<canvas id="c"></canvas>
+<style>html,body{margin:0;background:#111;color:#0f0;font:12px monospace}#v{width:900px;height:600px;border:0;display:block}</style>
+<pre id="s">starting</pre>
+<iframe id="v"></iframe>
 <script type="module">
 const q = new URLSearchParams(location.search);
-const tell = (status, shot) => { try { parent.postMessage({ cloudpc: "probe", status: status, shot: shot || null }, "*"); } catch (e) {} };
-try {
-  const mod = await import("./core/rfb.js");
-  const rfb = new mod.default(document.getElementById("c"), "wss://" + location.host + "/websockify", { credentials: { password: q.get("p") || "" } });
-  rfb.scaleViewport = true;
-  rfb.addEventListener("connect", () => {
-    tell("connected " + rfb._fbWidth + "x" + rfb._fbHeight);
-    setTimeout(() => { try { tell("shot", document.getElementById("c").toDataURL("image/png")); } catch (e) { tell("canvas read failed: " + e.message); } }, 2500);
-  });
-  rfb.addEventListener("disconnect", (e) => tell("disconnected " + ((e.detail && e.detail.clean) ? "clean" : "error")));
-  rfb.addEventListener("credentialsrequired", () => tell("the screen asked for a password"));
-} catch (e) { tell("failed: " + (e && e.message)); }
+const pw = q.get("p") || "";
+const s = document.getElementById("s");
+const tell = (status, shot) => { s.textContent = status; try { parent.postMessage({ cloudpc: "probe", status: status, shot: shot || null }, "*"); } catch (e) {} };
+window.addEventListener("error", (e) => tell("page error: " + e.message));
+const v = document.getElementById("v");
+v.src = "/vnc.html?autoconnect=1&resize=scale&reconnect=0&password=" + encodeURIComponent(pw);
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+tell("opened the viewer");
+let canvas = null;
+for (let i = 0; i < 45; i++) {
+  await wait(1000);
+  try { canvas = v.contentDocument && v.contentDocument.querySelector("canvas"); } catch (e) { tell("cannot read the viewer: " + e.message); break; }
+  if (canvas) break;
+}
+if (!canvas) { tell("the viewer never created a canvas"); }
+else {
+  const w = canvas.width, h = canvas.height;
+  for (let i = 0; i < 25; i++) {
+    await wait(1000);
+    let info;
+    try {
+      const g = canvas.getContext("2d");
+      if (!g) info = "no 2d context, the viewer is using WebGL";
+      else {
+        const d = g.getImageData(0, 0, w, h).data;
+        let n = 0;
+        const seen = new Set();
+        for (let k = 0; k < d.length; k += 4) { if (d[k + 3] > 8) { n++; seen.add(d[k] + "," + d[k + 1] + "," + d[k + 2]); } }
+        info = "painted " + n + " of " + (w * h) + " pixels in " + seen.size + " colours";
+      }
+    } catch (e) { info = "cannot read the pixels: " + e.message; }
+    tell("canvas " + w + "x" + h + " - " + info);
+    if (/painted [1-9]/.test(info)) { try { tell("shot", canvas.toDataURL("image/png")); } catch (e) { } break; }
+  }
+}
 </script>
 '@
   try {
     [System.IO.File]::WriteAllText((Join-Path $script:NoVncDir "cloudpc-probe.html"), $probe)
     Note "wrote the connection probe page (viewer address + /cloudpc-probe.html?p=password)"
   } catch { Note "could not write the probe page: $($_.Exception.Message)" }
+
+  # A picture of the screen taken by this machine, so the desktop can be checked
+  # without a browser in the loop. vncdotool talks to TightVNC the same way a
+  # viewer does.
+  Note "taking a picture of the screen (probe mode)..."
+  python -m pip install --quiet --disable-pip-version-check --user vncdotool 2>&1 | Out-String | Write-Host
+  $shotPath = Join-Path (Get-RepoRoot) $script:ShotName
+  $py = @"
+from vncdotool import api
+client = api.connect('127.0.0.1::5900', password=r'$($script:Pw)')
+client.capture(r'$shotPath')
+client.disconnect()
+print('cloud pc: the screen picture was captured')
+"@
+  $pyPath = Join-Path $env:TEMP "cloudpc-shot.py"
+  [System.IO.File]::WriteAllText($pyPath, $py)
+  python $pyPath 2>&1 | Out-String | Write-Host
+  if (Test-Path $shotPath) {
+    Note "captured $((Get-Item $shotPath).Length) bytes of screen"
+    Publish-Screenshot $script:ShotName
+  } else {
+    Note "the screen capture produced no picture"
+  }
 }
 
 # --- 3. the address: Cloudflare quick tunnel -----------------------------
@@ -465,5 +530,6 @@ try {
   try {
     Remove-PublishedState
   } catch { Note "could not remove $($script:StateName): $($_.Exception.Message)" }
+  if ($env:CLOUDPC_PROBE -eq "true") { Remove-PublishedScreenshot $script:ShotName }
   Note "session over. Thanks for flying Cloud PC."
 }
