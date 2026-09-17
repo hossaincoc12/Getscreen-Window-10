@@ -469,46 +469,57 @@ if (Test-Port $script:WebPort) {
 if ($env:CLOUDPC_PROBE -eq "true") {
   $probe = @'
 <!doctype html><meta charset="utf-8"><title>cloud pc probe</title>
-<style>html,body{margin:0;background:#111;color:#0f0;font:12px monospace}#v{width:900px;height:600px;border:0;display:block}</style>
+<style>html,body{margin:0;background:#111;color:#0f0;font:12px monospace}#v{width:900px;height:600px;border:0;display:block;background:#000}</style>
 <pre id="s">starting</pre>
 <iframe id="v"></iframe>
-<script type="module">
+<script>
 const q = new URLSearchParams(location.search);
 const pw = q.get("p") || "";
 const s = document.getElementById("s");
-const tell = (status, shot) => { s.textContent = status; try { parent.postMessage({ cloudpc: "probe", status: status, shot: shot || null }, "*"); } catch (e) {} };
+const lines = [];
+const tell = (t) => { lines.push(t); s.textContent = lines.join("\n"); };
+const send = (d) => { try { parent.postMessage(Object.assign({ cloudpc: "probe" }, d), "*"); } catch (e) {} };
 window.addEventListener("error", (e) => tell("page error: " + e.message));
-const v = document.getElementById("v");
-v.src = "/vnc.html?autoconnect=1&resize=scale&reconnect=0&password=" + encodeURIComponent(pw);
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-tell("opened the viewer");
-let canvas = null;
-for (let i = 0; i < 45; i++) {
-  await wait(1000);
-  try { canvas = v.contentDocument && v.contentDocument.querySelector("canvas"); } catch (e) { tell("cannot read the viewer: " + e.message); break; }
-  if (canvas) break;
+const v = document.getElementById("v");
+function biggest(doc) {
+  const list = Array.from(doc.querySelectorAll("canvas")).sort((a, b) => (b.width * b.height) - (a.width * a.height));
+  return list[0] || null;
 }
-if (!canvas) { tell("the viewer never created a canvas"); }
-else {
-  const w = canvas.width, h = canvas.height;
-  for (let i = 0; i < 25; i++) {
+async function watch(label, url, statusId, seconds) {
+  v.src = url;
+  let best = 0, shot = null, status = "", detail = "";
+  for (let i = 0; i < seconds; i++) {
     await wait(1000);
-    let info;
+    let doc;
+    try { doc = v.contentDocument; } catch (e) { tell(label + ": the viewer cannot be read (" + e.message + ")"); break; }
+    if (!doc) continue;
+    if (statusId) { const el = doc.getElementById(statusId); if (el) status = (el.textContent || "").trim(); }
+    const c = biggest(doc);
+    if (!c) { tell(label + " " + i + "s: no canvas  status=" + status); continue; }
+    let info = c.width + "x" + c.height;
     try {
-      const g = canvas.getContext("2d");
-      if (!g) info = "no 2d context, the viewer is using WebGL";
-      else {
-        const d = g.getImageData(0, 0, w, h).data;
-        let n = 0;
-        const seen = new Set();
-        for (let k = 0; k < d.length; k += 4) { if (d[k + 3] > 8) { n++; seen.add(d[k] + "," + d[k + 1] + "," + d[k + 2]); } }
-        info = "painted " + n + " of " + (w * h) + " pixels in " + seen.size + " colours";
-      }
-    } catch (e) { info = "cannot read the pixels: " + e.message; }
-    tell("canvas " + w + "x" + h + " - " + info);
-    if (/painted [1-9]/.test(info)) { try { tell("shot", canvas.toDataURL("image/png")); } catch (e) { } break; }
+      const g = c.getContext("2d");
+      const d = g.getImageData(0, 0, c.width, c.height).data;
+      let n = 0; const set = new Set();
+      for (let k = 0; k < d.length; k += 4) { if (d[k + 3] > 8) { n++; if (set.size < 4000) set.add(d[k] + "," + d[k + 1] + "," + d[k + 2]); } }
+      info += " painted " + n + " pixels in " + set.size + " colours";
+      if (n > best) { best = n; try { shot = c.toDataURL("image/png"); } catch (e) {} }
+    } catch (e) { info += " (cannot read the pixels: " + e.message + ")"; }
+    detail = info + "  status=" + status;
+    tell(label + " " + i + "s: " + detail);
+    if (best > 1000 && /Connected/i.test(status)) break;
   }
+  return { best: best, shot: shot, status: status, detail: detail };
 }
+(async () => {
+  tell("probing the viewers (password of length " + pw.length + ")");
+  const lite = await watch("vnc_lite.html", "/vnc_lite.html?password=" + encodeURIComponent(pw) + "&scale=true", "status", 35);
+  send({ status: "vnc_lite: " + lite.detail, shot: lite.shot });
+  const full = await watch("vnc.html", "/vnc.html?autoconnect=1&resize=scale&reconnect=0&password=" + encodeURIComponent(pw), "noVNC_status", 35);
+  send({ status: "vnc.html: " + full.detail, shot: full.shot });
+  send({ status: "done. lite=" + lite.best + "px status=" + lite.status + " | vnc.html=" + full.best + "px status=" + full.status });
+})();
 </script>
 '@
   try {
