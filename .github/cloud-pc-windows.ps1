@@ -270,6 +270,31 @@ function Save-State([string]$status) {
   Push-State
 }
 
+# The address file is rewritten with "starting" as the very first thing the
+# machine does, before the slow installs. It carries this session's name, so the
+# page can tell "my machine is on its way up" apart from "somebody else's live
+# session". It also means that an address left behind by a run that was cancelled
+# while it was still starting is replaced within seconds instead of sitting in the
+# repository looking like a desktop that is up.
+function Save-Starting {
+  $obj = [ordered]@{
+    status     = "starting"
+    url        = ""
+    viewer     = ""
+    session    = $script:Session
+    runId      = $script:RunId
+    runUrl     = $script:RunUrl
+    repository = "$env:GITHUB_REPOSITORY"
+    startedAt  = $script:StartedUtc.ToString("o")
+    updatedAt  = (Get-Date).ToUniversalTime().ToString("o")
+    expiresAt  = $script:StartedUtc.AddMinutes($script:MaxMinutes).ToString("o")
+    os         = ""
+  }
+  try { [System.IO.File]::WriteAllText($script:StatePath, ($obj | ConvertTo-Json -Compress)) }
+  catch { Warn "could not write $($script:StateName): $($_.Exception.Message)"; return }
+  Push-State
+}
+
 function Start-Tunnel {
   Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 2
@@ -301,6 +326,7 @@ try {
   Note "host: $os / $cpu / ${ram} GB RAM"
 } catch { Note "host: unknown" }
 Note "session $($script:Session), run $($script:RunId), password set"
+Save-Starting
 
 # --- keep the desktop awake and out of the way ---------------------------
 try {
