@@ -458,8 +458,15 @@ else {
   $shotPath = Join-Path (Get-RepoRoot) $script:ShotName
   $py = @"
 from vncdotool import api
-client = api.connect('127.0.0.1::5900', password=r'$($script:Pw)')
-client.capture(r'$shotPath')
+client = api.connect('127.0.0.1::5900', password=r'$($script:Pw)', timeout=90)
+print('cloud pc: the machine says its screen is', client.width, 'x', client.height)
+client.captureScreen(r'$shotPath')
+colours = client.screen.getcolors(maxcolors=2000000)
+if colours is None:
+    print('cloud pc: the screen is full of colours - that looks like a real desktop')
+else:
+    colours.sort(reverse=True)
+    print('cloud pc: the screen has', len(colours), 'colours; the commonest is', colours[0][1], 'covering', colours[0][0], 'of', client.width * client.height, 'pixels')
 client.disconnect()
 print('cloud pc: the screen picture was captured')
 "@
