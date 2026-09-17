@@ -376,6 +376,39 @@ if (Test-Port $script:WebPort) {
   Fail "the web viewer did not start on port $($script:WebPort)."
 }
 
+# A tiny diagnostic page served by the same viewer: open
+#   <the viewer address>/cloudpc-probe.html?p=<password>
+# in a browser and it says whether the screen really answers, and (when it can)
+# sends a picture of the current screen to the page that opened it. Only written
+# when the workflow is started with the "probe" input, so a normal session never
+# has it.
+if ($env:CLOUDPC_PROBE -eq "true") {
+  $probe = @'
+<!doctype html><meta charset="utf-8"><title>cloud pc probe</title>
+<style>html,body{margin:0;height:100%;background:#111}canvas{display:block;width:100%;height:100%}</style>
+<canvas id="c"></canvas>
+<script type="module">
+const q = new URLSearchParams(location.search);
+const tell = (status, shot) => { try { parent.postMessage({ cloudpc: "probe", status: status, shot: shot || null }, "*"); } catch (e) {} };
+try {
+  const mod = await import("./core/rfb.js");
+  const rfb = new mod.default(document.getElementById("c"), "wss://" + location.host + "/websockify", { credentials: { password: q.get("p") || "" } });
+  rfb.scaleViewport = true;
+  rfb.addEventListener("connect", () => {
+    tell("connected " + rfb._fbWidth + "x" + rfb._fbHeight);
+    setTimeout(() => { try { tell("shot", document.getElementById("c").toDataURL("image/png")); } catch (e) { tell("canvas read failed: " + e.message); } }, 2500);
+  });
+  rfb.addEventListener("disconnect", (e) => tell("disconnected " + ((e.detail && e.detail.clean) ? "clean" : "error")));
+  rfb.addEventListener("credentialsrequired", () => tell("the screen asked for a password"));
+} catch (e) { tell("failed: " + (e && e.message)); }
+</script>
+'@
+  try {
+    [System.IO.File]::WriteAllText((Join-Path $script:NoVncDir "cloudpc-probe.html"), $probe)
+    Note "wrote the connection probe page (viewer address + /cloudpc-probe.html?p=password)"
+  } catch { Note "could not write the probe page: $($_.Exception.Message)" }
+}
+
 # --- 3. the address: Cloudflare quick tunnel -----------------------------
 Note "downloading cloudflared..."
 if (-not (Test-Path $script:CloudflaredExe)) {
