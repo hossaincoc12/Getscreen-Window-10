@@ -34,6 +34,24 @@ $script:StatePath = Join-Path $script:RepoRoot $script:StateName
 # Only used in troubleshooting (probe) runs: a picture of the screen taken by the
 # machine itself, published next to the state file.
 $script:ShotName = "cloud-pc-windows-shot.png"
+$script:DiagName = "cloud-pc-windows-probe.txt"
+# Everything a probe run publishes into the repository, so every one of these can
+# be deleted again when the session ends.
+$script:ScratchFiles = @(
+  $script:ShotName, $script:DiagName,
+  "cloud-pc-windows-shot1.png", "cloud-pc-windows-shot2.png", "cloud-pc-windows-shot3.png",
+  "cloud-pc-windows-shot4.png", "cloud-pc-windows-shot5.png", "cloud-pc-windows-shot6.png",
+  "cloud-pc-windows-shot7.png"
+)
+# The local account that is signed in on the console, so the screen shows a real
+# desktop instead of the Windows sign-in screen. The runner itself runs as a
+# service with no interactive session of its own, so a desktop needs an account
+# that is typed at the sign-in screen (see the probe block further down).
+$script:AccountUser = "cloudpc"
+# Windows wants a password with a capital letter and a digit. This one is only
+# ever typed by the machine's own sign-in and is never published anywhere - the
+# screen server keeps its own separate 8-character password.
+$script:AccountPw = "Cloudpc9Aa"
 # A workflow token is handed in so the address can also be published through the
 # GitHub REST API, which works even when the local git checkout is unusable.
 $script:Token = "$env:CLOUDPC_TOKEN"
@@ -450,41 +468,176 @@ else {
     Note "wrote the connection probe page (viewer address + /cloudpc-probe.html?p=password)"
   } catch { Note "could not write the probe page: $($_.Exception.Message)" }
 
-  # A picture of the screen taken by this machine, so the desktop can be checked
-  # without a browser in the loop. vncdotool talks to TightVNC the same way a
-  # viewer does.
-  Note "taking a picture of the screen (probe mode)..."
+  # --- what is going on, exactly? -----------------------------------------
+  # Everything here also goes into cloud-pc-windows-probe.txt, so a run can be
+  # checked from the repository without downloading the job log.
+  $diag = New-Object System.Collections.ArrayList
+  [void]$diag.Add("Cloud PC probe - run $($script:RunId) - $(Get-Date -Format s)")
+  try { [void]$diag.Add("this script runs in session " + (Get-Process -Id $PID).SessionId) } catch { }
+  [void]$diag.Add("--- sessions (qwinsta) ---")
+  [void]$diag.Add(((qwinsta 2>&1 | Out-String).Trim()))
+  [void]$diag.Add("--- desktop processes ---")
+  foreach ($p in (Get-Process explorer, winlogon, LogonUI -ErrorAction SilentlyContinue)) {
+    [void]$diag.Add("  " + $p.ProcessName + " pid " + $p.Id + " session " + $p.SessionId)
+  }
+  [void]$diag.Add("--- TightVNC settings ---")
+  try {
+    $foundTvn = $false
+    foreach ($k in @("HKLM:\SOFTWARE\TightVNC\Server", "HKLM:\SOFTWARE\WOW6432Node\TightVNC\Server")) {
+      if (-not (Test-Path $k)) { continue }
+      $foundTvn = $true
+      [void]$diag.Add("  key $k")
+      foreach ($prop in (Get-ItemProperty $k).PSObject.Properties) {
+        if ($prop.Name -like "PS*") { continue }
+        $value = if ($prop.Name -match "assword") { "(hidden)" } else { [string]$prop.Value }
+        [void]$diag.Add("    " + $prop.Name + " = " + $value)
+      }
+    }
+    if (-not $foundTvn) { [void]$diag.Add("  no TightVNC settings key found") }
+  } catch { [void]$diag.Add("  could not read the TightVNC settings: " + $_.Exception.Message) }
+
+  # A display that has been switched off by power saving captures as a black
+  # picture, which looks exactly like "nothing is being shown", so make sure the
+  # screen stays on for as long as the machine lives.
+  powercfg /change monitor-timeout-ac 0 2>&1 | Out-Null
+  powercfg /change monitor-timeout-dc 0 2>&1 | Out-Null
+  powercfg /change standby-timeout-ac 0 2>&1 | Out-Null
+  [void]$diag.Add("asked Windows to keep the display on (no stand-by, no switching off)")
+
+  # --- sign an account in on the console ----------------------------------
+  # The runner is a service in session 0 and nobody is signed in on the console,
+  # so the screen is the Windows sign-in screen (or, worse, nothing at all). A
+  # desktop needs a signed-in user, and from session 0 the only way in is to type
+  # at the sign-in screen through the screen server itself.
+  try {
+    if (Get-LocalUser -Name $script:AccountUser -ErrorAction SilentlyContinue) {
+      net user $script:AccountUser $script:AccountPw 2>&1 | Out-String | Write-Host
+      [void]$diag.Add("reset the password of the local account $($script:AccountUser)")
+    } else {
+      net user $script:AccountUser $script:AccountPw /add 2>&1 | Out-String | Write-Host
+      [void]$diag.Add("created the local account $($script:AccountUser)")
+    }
+    net localgroup Administrators $script:AccountUser /add 2>&1 | Out-String | Write-Host
+    net localgroup "Remote Desktop Users" $script:AccountUser /add 2>&1 | Out-String | Write-Host
+    $winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+    Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value "1" -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $winlogon -Name DefaultUserName -Value $script:AccountUser -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $winlogon -Name DefaultPassword -Value $script:AccountPw -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $winlogon -Name DefaultDomainName -Value $env:COMPUTERNAME -Force -ErrorAction SilentlyContinue
+    [void]$diag.Add("told Windows to sign $($script:AccountUser) in by itself if it ever starts again")
+  } catch { [void]$diag.Add("could not prepare the account: " + $_.Exception.Message) }
+
+  # vncdotool talks to TightVNC exactly the way a viewer does, so the sign-in
+  # screen can be typed at - and a picture of the screen can be taken - without a
+  # browser anywhere in the loop.
+  Note "installing vncdotool..."
   python -m pip install --quiet --disable-pip-version-check --user vncdotool 2>&1 | Out-String | Write-Host
-  $shotPath = Join-Path (Get-RepoRoot) $script:ShotName
+  $shotRoot = (Get-RepoRoot)
   $py = @"
-import traceback
+import os, sys, time, traceback
 from vncdotool import api
-try:
-    client = api.connect('127.0.0.1::5900', password=r'$($script:Pw)', timeout=90)
-    client.captureScreen(r'$shotPath')
-    image = client.screen
-    width, height = image.size
-    print('cloud pc: the machine says its screen is', width, 'x', height)
+
+mode = sys.argv[1] if len(sys.argv) > 1 else "shot"
+password = r'$($script:Pw)'
+account = r'$($script:AccountUser)'
+accountpw = r'$($script:AccountPw)'
+root = r'$shotRoot'
+
+def stats(label, image):
+    w, h = image.size
     colours = image.getcolors(maxcolors=2000000)
     if colours is None:
-        print('cloud pc: the screen is full of colours - that looks like a real desktop')
+        print('cloud pc:', label, 'is', w, 'x', h, 'and is full of colours')
     else:
         colours.sort(reverse=True)
-        print('cloud pc: the screen has', len(colours), 'colours; the commonest is', colours[0][1], 'covering', colours[0][0], 'of', width * height, 'pixels')
+        print('cloud pc:', label, 'is', w, 'x', h, 'with', len(colours), 'colours; the commonest is', colours[0][1], 'covering', colours[0][0], 'of', w * h, 'pixels')
+
+def cap(client, name, wait):
+    time.sleep(wait)
+    try:
+        path = os.path.join(root, name)
+        client.captureScreen(path)
+        print('cloud pc: captured', name, '(', os.path.getsize(path), 'bytes )')
+        stats(name, client.screen)
+    except Exception:
+        print('cloud pc: could not capture', name)
+        traceback.print_exc()
+
+def put(client, text):
+    for ch in text:
+        client.keyPress('shift-' + ch.lower() if ch.isupper() else ch)
+        time.sleep(0.08)
+
+def clear_field(client):
+    client.keyDown('ctrl')
+    client.keyPress('a')
+    client.keyUp('ctrl')
+    time.sleep(0.2)
+    client.keyPress('delete')
+    time.sleep(0.2)
+
+try:
+    client = api.connect('127.0.0.1::5900', password=password, timeout=120)
+    if mode == 'login':
+        cap(client, 'cloud-pc-windows-shot1.png', 2)
+        print('cloud pc: asking Windows for its sign-in screen (Ctrl+Alt+Del)')
+        client.keyDown('ctrl')
+        client.keyDown('alt')
+        client.keyPress('delete')
+        client.keyUp('alt')
+        client.keyUp('ctrl')
+        cap(client, 'cloud-pc-windows-shot2.png', 8)
+        print('cloud pc: typing the account name')
+        clear_field(client)
+        put(client, account)
+        cap(client, 'cloud-pc-windows-shot3.png', 3)
+        client.keyPress('tab')
+        time.sleep(1)
+        print('cloud pc: typing the account password')
+        clear_field(client)
+        put(client, accountpw)
+        cap(client, 'cloud-pc-windows-shot4.png', 3)
+        print('cloud pc: pressing enter')
+        client.keyPress('enter')
+        cap(client, 'cloud-pc-windows-shot5.png', 25)
+        cap(client, 'cloud-pc-windows-shot6.png', 45)
+    else:
+        cap(client, 'cloud-pc-windows-shot7.png', 3)
     client.disconnect()
-    print('cloud pc: the screen picture was captured')
 except Exception:
     traceback.print_exc()
 "@
   $pyPath = Join-Path $env:TEMP "cloudpc-shot.py"
   [System.IO.File]::WriteAllText($pyPath, $py)
-  python $pyPath 2>&1 | Out-String | Write-Host
-  if (Test-Path $shotPath) {
-    Note "captured $((Get-Item $shotPath).Length) bytes of screen"
-    Publish-Screenshot $script:ShotName
-  } else {
-    Note "the screen capture produced no picture"
+  python $pyPath login 2>&1 | Out-String | Write-Host
+  [void]$diag.Add("--- after the sign-in attempt ---")
+  [void]$diag.Add(((qwinsta 2>&1 | Out-String).Trim()))
+  foreach ($p in (Get-Process explorer -ErrorAction SilentlyContinue)) {
+    [void]$diag.Add("  explorer pid " + $p.Id + " session " + $p.SessionId)
   }
+
+  # The screen server has to be told about the new desktop, so restart it and take
+  # one more picture - this is the one that shows whether the desktop really came
+  # up, the way a viewer would see it.
+  Note "restarting the screen server so it follows the new desktop..."
+  try { Restart-Service -Name "tvnserver" -Force -ErrorAction Stop; Note "restarted the TightVNC service" }
+  catch { Note "could not restart the TightVNC service: $($_.Exception.Message)" }
+  Start-Sleep -Seconds 8
+  python $pyPath shot 2>&1 | Out-String | Write-Host
+
+  foreach ($name in $script:ScratchFiles) {
+    $p = Join-Path (Get-RepoRoot) $name
+    if (Test-Path $p) {
+      Note ("captured " + $name + " (" + (Get-Item $p).Length + " bytes)")
+      if ($name -ne $script:DiagName) { Publish-Screenshot $name }
+    } else {
+      Note "nothing was captured as $name"
+    }
+  }
+  try {
+    [System.IO.File]::WriteAllText((Join-Path (Get-RepoRoot) $script:DiagName), ($diag -join "`r`n"))
+    if (Publish-ThroughApi "Cloud PC: probe notes" $false $script:DiagName) { Note "published the probe notes as $($script:DiagName)" }
+  } catch { Note "could not write the probe notes: $($_.Exception.Message)" }
 }
 
 # --- 3. the address: Cloudflare quick tunnel -----------------------------
@@ -543,6 +696,8 @@ try {
   try {
     Remove-PublishedState
   } catch { Note "could not remove $($script:StateName): $($_.Exception.Message)" }
-  if ($env:CLOUDPC_PROBE -eq "true") { Remove-PublishedScreenshot $script:ShotName }
+  if ($env:CLOUDPC_PROBE -eq "true") {
+    foreach ($name in $script:ScratchFiles) { Remove-PublishedScreenshot $name }
+  }
   Note "session over. Thanks for flying Cloud PC."
 }
